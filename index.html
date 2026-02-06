@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Smart City AI Controller</title>
+    <style>
+        /* ... Keep your existing CSS ... */
+        :root {
+            --bg-color: #050505;
+            --panel-bg: #111;
+            --text-color: #eee;
+            --accent-color: #00ffff;
+        }
+        body { margin: 0; background: var(--bg-color); color: var(--text-color); font-family: 'Segoe UI', sans-serif; display: flex; height: 100vh; overflow: hidden; }
+
+        #map-area { flex: 1; display: flex; justify-content: center; align-items: center; background: radial-gradient(circle, #1a1a1a 0%, #000 100%); position: relative; }
+        canvas { box-shadow: 0 0 50px rgba(0,0,0,0.9); border: 1px solid #333; cursor: crosshair; }
+
+        #sidebar { width: 320px; background: var(--panel-bg); padding: 20px; display: flex; flex-direction: column; gap: 15px; border-left: 1px solid #333; z-index: 10; box-shadow: -5px 0 20px rgba(0,0,0,0.7); }
+
+        h2 { color: var(--accent-color); text-transform: uppercase; border-bottom: 1px solid #333; padding-bottom: 10px; margin: 0 0 10px 0; letter-spacing: 2px; }
+
+        .status-box { background: #1a1a1a; padding: 15px; border-left: 3px solid var(--accent-color); font-size: 0.9em; }
+        .row { display: flex; justify-content: space-between; margin-bottom: 5px; }
+        .val { font-weight: bold; color: #fff; }
+
+        button { background: #222; color: var(--accent-color); border: 1px solid var(--accent-color); padding: 12px; cursor: pointer; text-transform: uppercase; font-weight: bold; width: 100%; transition: 0.3s; }
+        button:hover { background: var(--accent-color); color: #000; box-shadow: 0 0 15px var(--accent-color); }
+
+        .mode-select { display: flex; gap: 5px; margin-top: 10px; }
+        .mode-btn { flex: 1; border: 1px solid #555; background: #222; color: #aaa; padding: 8px; font-size: 0.8em; }
+        .mode-btn.active { background: var(--accent-color); color: black; border-color: var(--accent-color); }
+
+        #hint { font-size: 0.8em; color: #888; text-align: center; margin-top: 5px; font-style: italic; }
+    </style>
+</head>
+<body>
+
+    <div id="map-area">
+        <canvas id="cityCanvas"></canvas>
+    </div>
+
+    <div id="sidebar">
+        <h2>Traffic AI Control</h2>
+
+        <div class="status-box">
+            <div class="row"><span>Status</span> <span class="val" id="status" style="color: lime">Ready</span></div>
+            <div class="row"><span>Steps</span> <span class="val" id="steps">0</span></div>
+        </div>
+
+        <div>
+            <label style="font-size: 0.8em; color: #aaa; text-transform: uppercase;">Map Interaction Mode</label>
+            <div class="mode-select">
+                <button class="mode-btn active" onclick="setMode('start')" id="btn-start">Set Start</button>
+                <button class="mode-btn" onclick="setMode('end')" id="btn-end">Set End</button>
+            </div>
+            <div id="hint">Click on a road to move Start point</div>
+        </div>
+
+        <button onclick="requestSimulation(true)" style="margin-top: 20px;">Generate New City</button>
+        <button onclick="requestSimulation(false)">Recalculate Path</button>
+        <button onclick="replayPath()" style="border-color: #555; color: #aaa;">Replay</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('cityCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let simData = null;
+        let cellSize = 18;
+        let carIndex = 0;
+        let animId;
+
+        // Interaction State
+        let clickMode = 'start'; // 'start' or 'end'
+        let startPos = [1, 1];
+        let endPos = [39, 39];
+
+        // Load Car Image
+        const carImg = new Image();
+        // Simple pixel art car SVG as data URL
+        carImg.src = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjMDBmZmZmIiBzdHJva2Utd2lkdGg9IjIiPjxwYXRoIGQ9Ik01IDEyaDE0TTUgMTJsMy0zTTUgMTJsMyAzIiB0cmFuc2Zvcm09InJvdGF0ZSgxODAgMTIgMTIpIi8+PHJlY3QgeD0iMiIgeT0iNiIgd2lkdGg9IjIwIiBoZWlnaHQ9IjEyIiByeD0iMyIgc3Ryb2tlPSIjZmZmIiBmaWxsPSJyZ2JhKDAsIDI1NSwgMjU1LCAwLjIpIi8+PC9zdmc+";
+
+        // Initial Load
+        requestSimulation(true);
+
+        function setMode(mode) {
+            clickMode = mode;
+            document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('btn-' + mode).classList.add('active');
+            document.getElementById('hint').innerText = mode === 'start' ? "Click road to set Start" : "Click road to set Destination";
+        }
+
+        // Handle Clicks
+        canvas.addEventListener('mousedown', (e) => {
+            if(!simData) return;
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            const c = Math.floor(x / cellSize);
+            const r = Math.floor(y / cellSize);
+
+            // Check bounds and if it is a road (grid=0)
+            if(r >= 0 && r < simData.dimensions.height && c >= 0 && c < simData.dimensions.width) {
+                if(simData.grid[r][c] === 1) {
+                    alert("Cannot place marker on a building!");
+                    return;
+                }
+
+                if(clickMode === 'start') startPos = [r, c];
+                else endPos = [r, c];
+
+                // Trigger Recalculation without generating new map
+                requestSimulation(false);
+            }
+        });
+
+        function requestSimulation(newMap) {
+            document.getElementById('status').innerText = "Computing...";
+            document.getElementById('status').style.color = "yellow";
+
+            fetch('/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ new_map: newMap, start: startPos, end: endPos })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if(data.status === 'error') {
+                    alert("Path blocked! Try moving the points.");
+                    return;
+                }
+                simData = data;
+                startPos = data.start; // Sync in case python corrected it
+                endPos = data.end;
+
+                // Auto-resize canvas
+                canvas.width = data.dimensions.width * cellSize;
+                canvas.height = data.dimensions.height * cellSize;
+
+                document.getElementById('steps').innerText = data.path.length;
+                document.getElementById('status').innerText = "Online";
+                document.getElementById('status').style.color = "#00ff00";
+
+                replayPath();
+            });
+        }
+
+        function draw() {
+            if(!simData) return;
+
+            // Background
+            ctx.fillStyle = "#050505";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Map
+            for(let r=0; r<simData.dimensions.height; r++){
+                for(let c=0; c<simData.dimensions.width; c++){
+                    let x = c*cellSize, y = r*cellSize;
+
+                    // Road or Building
+                    if(simData.grid[r][c] === 1) {
+                        ctx.fillStyle = "#111"; // Building
+                        ctx.fillRect(x,y,cellSize,cellSize);
+                    } else {
+                        ctx.fillStyle = "#222"; // Road
+                        ctx.fillRect(x,y,cellSize,cellSize);
+                        // Subtle grid lines
+                        ctx.strokeStyle="#2a2a2a"; ctx.strokeRect(x,y,cellSize,cellSize);
+                    }
+
+                    // Traffic Heatmap
+                    if(simData.traffic[r][c] > 0) {
+                        ctx.fillStyle = `rgba(255, 0, 0, 0.4)`;
+                        ctx.fillRect(x,y,cellSize,cellSize);
+                    }
+                }
+            }
+
+            // Path Line
+            if(simData.path && simData.path.length > 0) {
+                ctx.beginPath();
+                ctx.strokeStyle = "rgba(0, 255, 255, 0.3)";
+                ctx.lineWidth = 4;
+                ctx.lineCap = "round";
+                // Draw full path up to current index
+                for(let i=0; i<carIndex; i++){
+                    let [pr, pc] = simData.path[i];
+                    if(i==0) ctx.moveTo(pc*cellSize + cellSize/2, pr*cellSize + cellSize/2);
+                    else ctx.lineTo(pc*cellSize + cellSize/2, pr*cellSize + cellSize/2);
+                }
+                ctx.stroke();
+            }
+
+            // Start & End Markers
+            drawMarker(startPos[1], startPos[0], "#00ff00");
+            drawMarker(endPos[1], endPos[0], "#ff0000");
+
+            // DRAW CAR
+            if(simData.path && carIndex < simData.path.length) {
+                let [cr, cc] = simData.path[carIndex];
+                let cx = cc*cellSize + cellSize/2;
+                let cy = cr*cellSize + cellSize/2;
+
+                // Calculate Rotation
+                let angle = 0;
+                if(carIndex < simData.path.length - 1) {
+                    let [nr, nc] = simData.path[carIndex+1];
+                    // Atan2(y, x) -> remember y is rows (vertical), x is cols (horizontal)
+                    angle = Math.atan2(nr - cr, nc - cc);
+                }
+
+                ctx.save();
+                ctx.translate(cx, cy);
+                ctx.rotate(angle);
+                // Draw Image centered
+                ctx.drawImage(carImg, -cellSize/2, -cellSize/2, cellSize, cellSize);
+                ctx.restore();
+            }
+        }
+
+        function drawMarker(c, r, color) {
+            let x = c*cellSize + cellSize/2;
+            let y = r*cellSize + cellSize/2;
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = color;
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(x, y, 4, 0, Math.PI*2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+        }
+
+        function animate() {
+            draw();
+            if(simData && carIndex < simData.path.length - 1) {
+                carIndex++; // Simple speed
+            }
+            animId = requestAnimationFrame(animate);
+        }
+
+        function replayPath() {
+            carIndex = 0;
+            if(animId) cancelAnimationFrame(animId);
+            animate();
+        }
+    </script>
+</body>
+</html>
